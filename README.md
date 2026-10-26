@@ -2,8 +2,6 @@
 
 An asynchronous credit processing service built with **Python 3.11+**, **FastAPI**, **Celery**, **Redis**, **MongoDB**, and a **React** frontend, fully orchestrated with **Docker Compose**.
 
-This repository is built to satisfy the requirements outlined in the *Basta Tech Lead Programming Exercise*.
-
 ---
 
 ## Architecture Overview
