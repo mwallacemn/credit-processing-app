@@ -76,17 +76,13 @@ flowchart LR
 ## 2. End-to-End Component Interaction Flow
 
 1. **Request Ingestion (`POST /credits`)**:
-   - FastAPI validates `CreditRequest` (`user_id` non-empty, `amount > 0`; rejects invalid payloads with `422 Unprocessable Entity`).
-   - `UserCreditService.submit_credit()` converts the request into a `CreditTaskEvent(status="processing")` with a generated UUID `task_id` and persists it to the `credit_tasks` collection via `MongoUserRepository`.
-   - `UserCreditService` upserts the user document in the `users` collection with `status="processing"`.
-   - `UserCreditService` dispatches `process_credit.apply_async(args=[task_id], task_id=task_id)` to Redis and returns `202 Accepted`.
+   - FastAPI validates data and rejects invalid payloads with `422 Unprocessable Entity`.
+   - The use-case `UserCreditService`:
+     - converts the request into a domain entity with a generated UUID `task_id` and persists it to the `credit_tasks` collection via `MongoUserRepository`. 
+     - upserts the user document in the `users` collection with `status="processing"` and dispatches Celery task
 2. **Asynchronous Worker Execution (`process_credit`)**:
-   - The Celery worker consumes `task_id` from Redis and invokes `UserCreditService.execute_credit_task(task_id)`.
-   - **5-Minute Duplicate Validation**: The service queries `credit_tasks` for any active (`processing`) or completed (`processed`) task for the same `(user_id, amount)` within the last 5 minutes.
-   - **Pre-Emptive Queue Revocation**: If newer duplicate tasks (`created_at > current.created_at`) are sitting in the queue, the worker marks them `revoked_duplicate` in MongoDB and broadcasts `celery_app.control.revoke(task_ids)` to discard them from the broker queue.
-   - **Duplicate Rejection vs. Balance Update**:
-     - If an earlier or already-processed task exists within the 5-minute window, the current task is marked `failed_duplicate` and the user's status is reconciled back to `processed` (if no other tasks are in flight).
-     - Otherwise, the task atomically transitions from `processing` $\rightarrow$ `processed`, and MongoDB atomically increments the user's balance (`$inc: {"balance": amount}`) and sets `users.status = "processed"`.
+   - The Celery worker consumes `task_id` from Redis and uses the `CreditTaskService`.
+   - `CreditTaskService` applies some additional guards and validations: 5-Minute Duplicate Validation, Pre-Emptive Queue Revocation, Duplicate Rejection
 
 ---
 
@@ -94,20 +90,20 @@ flowchart LR
 
 The test suite (`backend/tests/`) follows the testing pyramid across all five architectural layers, executable via `docker compose run --rm backend pytest tests/ -v`:
 
-| Layer | Suite | Coverage Focus |
-| :--- | :--- | :--- |
-| **Domain** | `test_domain.py` | Entity defaults, UTC timezone normalization, exclusion of invalid states, DTO-to-entity converters (`to_event`, `from_event`, `from_user`), and abstract port enforcement. |
-| **Repository** | `test_repository.py` | Atomic `$inc` updates, creation guard rejecting non-`processing` tasks, optimistic concurrency filter preventing terminal-state overwrites, and 5-minute query filters. |
-| **Use-Cases** | `test_use_cases.py` | `UserCreditService` ingestion (`submit_credit`) and worker execution (`execute_credit_task`): happy path, 5-min duplicate rejection, burst queue revocation, user status reconciliation, and concurrent revoke abort. |
-| **Worker** | `test_worker_tasks.py` | Persistent event loop reuse across invocations, `celery_app.control.revoke` integration, and task execution wiring. |
-| **API** | `test_credits.py` | FastAPI `TestClient` tests with DI overrides for `POST /credits` (`202` & `422`), `GET /users/{id}` (`200` & `404`), `GET /credits/{id}`, and `GET /health`. |
+| Layer | Suite | Coverage Focus                                                                              |
+| :--- | :--- |:--------------------------------------------------------------------------------------------|
+| **Domain** | `test_domain.py` | Entity defaults, exclusion of invalid states, DTO-to-entity converters.                     |
+| **Repository** | `test_repository.py` | Atomic CRUD operations, optimistic concurrency filter preventing overwrites, query filters. |
+| **Use-Cases** | `test_use_cases.py` | Credit event ingestion and worker execution - happy path and edge states                    |
+| **Worker** | `test_worker_tasks.py` | Persistent event loop reuse across invocations and task execution wiring.                   |
+| **API** | `test_credits.py` | FastAPI `TestClient` tests with Dependecny Injection overrides for all endpoints            |
 
 ---
 
-## 5. Frontend Console & Additional Enhancements
+## 4. Additional Enhancements
 
 - **Interactive React Console (`frontend/`)**: Built with React, Vite, and served via Nginx on port `3000`. Allows reviewers to submit credit requests, view live task IDs, and automatically poll `GET /users/{user_id}` every second to watch the status transition from `processing` $\rightarrow$ `processed` and see live balance updates.
 - **Database Indexing & Lifespan Management**: On startup, FastAPI's `lifespan` hook automatically provisions unique indexes on `users(user_id)` and `credit_tasks(task_id)`, plus a compound index on `credit_tasks(user_id, amount, created_at)` for $O(\log N)$ 5-minute window lookups.
-- **Future Production Roadmap**:
+- **Future Ideas**:
   1. **API-Edge Idempotency Keys**: Accept an `Idempotency-Key` header in `POST /credits` stored in Redis with a TTL to short-circuit network retries before hitting MongoDB.
   2. **Transactional Outbox Pattern**: Write the `CreditTaskEvent` and `users` status update inside a MongoDB multi-document transaction, using Change Streams to publish to Redis for guaranteed at-least-once delivery even if Redis is momentarily unreachable.

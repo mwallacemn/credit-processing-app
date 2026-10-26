@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Technical Design Document: Async Credit Processing Service</title>
+  <style>
+    @page {
+      size: letter;
+      margin: 0.65in 0.75in;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      font-size: 9pt;
+      line-height: 1.5;
+      color: #1f2328;
+      background-color: #ffffff;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    h1 {
+      font-size: 18pt;
+      font-weight: 600;
+      color: #1f2328;
+      padding-bottom: 0.3em;
+      border-bottom: 1px solid #d1d9e0;
+      margin-bottom: 12px;
+      margin-top: 0;
+    }
+
+    h2 {
+      font-size: 13pt;
+      font-weight: 600;
+      color: #1f2328;
+      padding-bottom: 0.3em;
+      border-bottom: 1px solid #d1d9e0;
+      margin-top: 20px;
+      margin-bottom: 10px;
+    }
+
+    h3 {
+      font-size: 11pt;
+      font-weight: 600;
+      color: #1f2328;
+      margin-top: 16px;
+      margin-bottom: 8px;
+    }
+
+    p {
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+
+    hr {
+      height: 0.25em;
+      padding: 0;
+      margin: 16px 0;
+      background-color: #d1d9e0;
+      border: 0;
+    }
+
+    ul, ol {
+      margin-top: 0;
+      margin-bottom: 10px;
+      padding-left: 2em;
+    }
+
+    li {
+      margin-top: 0.25em;
+    }
+
+    li > p {
+      margin-bottom: 4px;
+    }
+
+    strong {
+      font-weight: 600;
+      color: #1f2328;
+    }
+
+    code {
+      padding: 0.2em 0.4em;
+      margin: 0;
+      font-size: 85%;
+      white-space: break-spaces;
+      background-color: rgba(175, 184, 193, 0.2);
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    pre {
+      padding: 12px;
+      overflow: auto;
+      font-size: 85%;
+      line-height: 1.45;
+      color: #1f2328;
+      background-color: #f6f8fa;
+      border-radius: 6px;
+      margin-top: 0;
+      margin-bottom: 12px;
+      border: 1px solid #d1d9e0;
+    }
+
+    pre code {
+      padding: 0;
+      background-color: transparent;
+      border-radius: 0;
+      font-size: 100%;
+      white-space: pre;
+    }
+
+    table {
+      border-spacing: 0;
+      border-collapse: collapse;
+      display: table;
+      width: 100%;
+      max-width: 100%;
+      overflow: auto;
+      margin-top: 8px;
+      margin-bottom: 14px;
+    }
+
+    table th, table td {
+      padding: 6px 12px;
+      border: 1px solid #d1d9e0;
+      font-size: 8.5pt;
+    }
+
+    table th {
+      font-weight: 600;
+      background-color: #f6f8fa;
+      text-align: left;
+    }
+
+    table tr:nth-child(2n) {
+      background-color: #f6f8fa;
+    }
+
+    /* Diagram visual styling */
+    .mermaid-diagram-container {
+      margin: 12px 0;
+      padding: 12px;
+      background-color: #f6f8fa;
+      border: 1px solid #d1d9e0;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .mermaid-svg {
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Technical Design Document: Async Credit Processing Service</h1>
+
+  <p>
+    <strong>Author:</strong> Mike Wallace<br>
+    <strong>Stack:</strong> Python 3.11+, FastAPI, Celery, Redis, MongoDB (Motor), React (Vite/Nginx), Docker Compose
+  </p>
+
+  <hr>
+
+  <h2>1. Summary &amp; Overview of Decisions</h2>
+  <p>
+    This async credit processing service is organized using Clean Architecture principals to decouple layers of the application. 
+    It consists of an API layer using FastAPI with pydantic models that validate incoming requests and structure responses,
+    an Application Services layer in the use-cases directory to manage interoperability between infrastructure pieces and the core domain,
+    a domain layer for core business logic and a repository layer to connect to DynamoDB. 
+  </p>
+
+  <p>
+    Before decision points, I'll note that the vast majority of code and portions of this document were written by Gemini 4 Argon and
+    Gemini 3.8 Flash. I used planning mode to design the updates and worked through multiple plan iterations before applying the changes.
+  </p>
+
+  <p><strong>Additional Decision points:</strong></p>
+  <ul>
+    <li>
+      I updated the API and data model by incorporating a Credit Task collection. This collection stores the credit amount, user,
+      and status instead of keeping status on the user record. This allows for multiple credits to be submitted (potentially from different actors) 
+      at the same time for a single user.
+    </li>
+    <li>
+      FastAPI and MongoDB's AsyncIOMotorClient use asyncio natively, but celery workers are naturally synchronous. To allow the same async use-case to be applied both within the core app and celery tasks,
+      a asyncio event loop singleton is made accessible by tasks.
+    </li>
+    <li>
+      To prevent crediting a user account erroneously through double-clicking, I added a guard that looks for other tasks submitted in the last 5 minutes with the same credit value.
+      If some are found, they are marked as duplicates and fail. Other in-flight celery events are also identified and revoked if they meet the same qualifications.
+    </li>
+    <li>
+      I chose Redis as a broker because the task data is small and Redis is faster than RabbitMQ. If the tasks required sending larger data payloads, I'd choose RabbitMQ
+    </li>
+    <li>
+      There is a front-end added for easy visibility and testing. I did not architect that code since it was not a requirement and do not condone its structure.
+    </li>
+    <li>
+      I decided to only promote spinning the app up using <code>docker compose</code> so the backend, Celery, Redis and MongoDB would all spin up in their own containers.
+    </li>
+  </ul>
+
+  <h3>Application Layering</h3>
+  <p>
+    To ensure maintainability, testability, and strict separation of concerns, the backend is organized into four concentric layers following <strong>Clean Architecture</strong> and the <strong>Dependency Inversion Principle (DIP)</strong>:
+  </p>
+
+  <div class="mermaid-diagram-container">
+    <svg class="mermaid-svg" viewBox="0 0 740 220" width="100%" height="210" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#475569"/>
+        </marker>
+        <marker id="arrow-dash" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#475569"/>
+        </marker>
+      </defs>
+
+      <!-- Subgraph 1: API -->
+      <rect x="10" y="10" width="165" height="195" rx="6" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.5"/>
+      <text x="92" y="30" font-size="10.5" font-weight="700" fill="#0369a1" text-anchor="middle">1. Presentation Layer (app/api)</text>
+      
+      <rect x="22" y="44" width="141" height="38" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="92" y="58" font-size="9" font-weight="600" fill="#0f172a" text-anchor="middle">FastAPI Routers</text>
+      <text x="92" y="72" font-size="8" fill="#64748b" text-anchor="middle">(credits, users, health)</text>
+
+      <rect x="22" y="94" width="141" height="42" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="92" y="109" font-size="9" font-weight="600" fill="#0f172a" text-anchor="middle">DTO Schemas</text>
+      <text x="92" y="123" font-size="7.8" fill="#64748b" text-anchor="middle">(CreditRequest/Response)</text>
+
+      <rect x="22" y="148" width="141" height="42" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="92" y="163" font-size="9" font-weight="600" fill="#0f172a" text-anchor="middle">Dependency Injection</text>
+      <text x="92" y="177" font-size="8" fill="#64748b" text-anchor="middle">(dependencies.py)</text>
+
+      <!-- Subgraph 2: Use Cases -->
+      <rect x="195" y="10" width="165" height="195" rx="6" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5"/>
+      <text x="277" y="30" font-size="10.5" font-weight="700" fill="#15803d" text-anchor="middle">2. Use-Cases (app/use_cases)</text>
+
+      <rect x="207" y="65" width="141" height="85" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="277" y="85" font-size="9.5" font-weight="700" fill="#0f172a" text-anchor="middle">UserCreditService</text>
+      <text x="277" y="102" font-size="8.5" fill="#475569" text-anchor="middle">(Submit Credit,</text>
+      <text x="277" y="117" font-size="8.5" fill="#475569" text-anchor="middle">Duplicate Guard &amp;</text>
+      <text x="277" y="132" font-size="8.5" fill="#475569" text-anchor="middle">Balance Execution)</text>
+
+      <!-- Subgraph 3: Domain -->
+      <rect x="380" y="10" width="165" height="195" rx="6" fill="#faf5ff" stroke="#9333ea" stroke-width="1.5"/>
+      <text x="462" y="30" font-size="10.5" font-weight="700" fill="#7e22ce" text-anchor="middle">3. Domain Layer (app/domain)</text>
+
+      <rect x="392" y="55" width="141" height="55" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="462" y="74" font-size="9" font-weight="600" fill="#0f172a" text-anchor="middle">Entities &amp; Enums</text>
+      <text x="462" y="89" font-size="8" fill="#64748b" text-anchor="middle">(User,</text>
+      <text x="462" y="101" font-size="8" fill="#64748b" text-anchor="middle">CreditTaskEvent)</text>
+
+      <rect x="392" y="125" width="141" height="55" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="462" y="145" font-size="9" font-weight="600" fill="#0f172a" text-anchor="middle">IUserInterface</text>
+      <text x="462" y="160" font-size="8" fill="#64748b" text-anchor="middle">(Abstract Repository</text>
+      <text x="462" y="172" font-size="8" fill="#64748b" text-anchor="middle">Port)</text>
+
+      <!-- Subgraph 4: Infrastructure -->
+      <rect x="565" y="10" width="165" height="195" rx="6" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5"/>
+      <text x="647" y="30" font-size="10.5" font-weight="700" fill="#c2410c" text-anchor="middle">4. Infra (app/infrastructure)</text>
+
+      <rect x="577" y="44" width="141" height="42" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="647" y="58" font-size="8.5" font-weight="600" fill="#0f172a" text-anchor="middle">MongoUserRepository</text>
+      <text x="647" y="72" font-size="7.5" fill="#64748b" text-anchor="middle">(Motor Async Adapter)</text>
+
+      <rect x="577" y="96" width="141" height="42" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="647" y="110" font-size="8.5" font-weight="600" fill="#0f172a" text-anchor="middle">Celery Worker &amp; Redis</text>
+      <text x="647" y="124" font-size="7.5" fill="#64748b" text-anchor="middle">(tasks.py, celery_app.py)</text>
+
+      <rect x="577" y="148" width="141" height="42" rx="4" fill="#ffffff" stroke="#94a3b8"/>
+      <text x="647" y="163" font-size="8.5" font-weight="600" fill="#0f172a" text-anchor="middle">MongoDB</text>
+      <text x="647" y="177" font-size="7.5" fill="#64748b" text-anchor="middle">(users, credit_tasks)</text>
+
+      <!-- Connecting Arrows -->
+      <line x1="92" y1="82" x2="92" y2="94" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="163" y1="169" x2="207" y2="135" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="348" y1="120" x2="392" y2="145" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="577" y1="65" x2="533" y2="135" stroke="#475569" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#arrow-dash)"/>
+      <line x1="577" y1="117" x2="348" y2="107" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="647" y1="86" x2="647" y2="96" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="647" y1="138" x2="647" y2="148" stroke="#475569" stroke-width="1.2" marker-end="url(#arrow)"/>
+    </svg>
+  </div>
+
+  <ol>
+    <li>
+      <strong>Domain Layer (<code>app/domain</code>)</strong>: Defines core entities (<code>User</code>, <code>CreditTaskEvent</code>), strict lifecycle enums (<code>UserStatus</code>, <code>TaskStatus</code>), and the abstract persistence port (<code>IUserInterface</code>).
+    </li>
+    <li>
+      <strong>Use-Cases Layer (<code>app/use_cases</code>)</strong>: Encapsulates application business rules inside a unified <strong><code>UserCreditService</code></strong>:
+      <ul>
+        <li><strong>Ingestion &amp; Queries:</strong> Orchestrates credit submission and state queries via an injected <code>IUserInterface</code>.</li>
+        <li><strong>Worker Execution:</strong> Invoked by the Celery worker to enforce the 5-minute duplicate credit guard, revoke queued duplicate tasks, and apply valid balance updates.</li>
+      </ul>
+    </li>
+    <li>
+      <strong>Infrastructure Layer (<code>app/infrastructure</code>)</strong>: Implements concrete adapters:
+      <ul>
+        <li><strong><code>MongoUserRepository</code></strong>: Implements <code>IUserInterface</code> using Motor (<code>AsyncIOMotorClient</code>), encapsulating all database connection management (<code>get_async_database</code>) and atomic state guards.</li>
+        <li><strong>Celery &amp; Redis (<code>celery_app.py</code>, <code>tasks.py</code>)</strong>: Configures Redis as both message broker (<code>db 0</code>) and result backend (<code>db 1</code>), with exponential backoff retries (<code>max_retries=3</code>).</li>
+      </ul>
+    </li>
+    <li>
+      <strong>Presentation Layer (<code>app/api</code>)</strong>: FastAPI routers (<code>credits.py</code>, <code>users.py</code>, <code>health.py</code>), app factory (<code>app.py</code>), and DTO schemas (<code>schemas.py</code>) with bidirectional domain converters (<code>to_event()</code>, <code>from_event()</code>, <code>from_user()</code>).
+    </li>
+  </ol>
+
+  <hr>
+
+  <h2>2. End-to-End Component Interaction Flow</h2>
+
+  <ol>
+    <li>
+      <strong>Request Ingestion (<code>POST /credits</code>)</strong>:
+      <ul>
+        <li>FastAPI validates <code>CreditRequest</code> (<code>user_id</code> non-empty, <code>amount &gt; 0</code>; rejects invalid payloads with <code>422 Unprocessable Entity</code>).</li>
+        <li><code>UserCreditService.submit_credit()</code> converts the request into a <code>CreditTaskEvent(status="processing")</code> with a generated UUID <code>task_id</code> and persists it to the <code>credit_tasks</code> collection via <code>MongoUserRepository</code>.</li>
+        <li><code>UserCreditService</code> upserts the user document in the <code>users</code> collection with <code>status="processing"</code>.</li>
+        <li><code>UserCreditService</code> dispatches <code>process_credit.apply_async(args=[task_id], task_id=task_id)</code> to Redis and returns <code>202 Accepted</code>.</li>
+      </ul>
+    </li>
+    <li>
+      <strong>Asynchronous Worker Execution (<code>process_credit</code>)</strong>:
+      <ul>
+        <li>The Celery worker consumes <code>task_id</code> from Redis and invokes <code>UserCreditService.execute_credit_task(task_id)</code>.</li>
+        <li><strong>5-Minute Duplicate Validation</strong>: The service queries <code>credit_tasks</code> for any active (<code>processing</code>) or completed (<code>processed</code>) task for the same <code>(user_id, amount)</code> within the last 5 minutes.</li>
+        <li><strong>Pre-Emptive Queue Revocation</strong>: If newer duplicate tasks (<code>created_at &gt; current.created_at</code>) are sitting in the queue, the worker marks them <code>revoked_duplicate</code> in MongoDB and broadcasts <code>celery_app.control.revoke(task_ids)</code> to discard them from the broker queue.</li>
+        <li>
+          <strong>Duplicate Rejection vs. Balance Update</strong>:
+          <ul>
+            <li>If an earlier or already-processed task exists within the 5-minute window, the current task is marked <code>failed_duplicate</code> and the user's status is reconciled back to <code>processed</code> (if no other tasks are in flight).</li>
+            <li>Otherwise, the task atomically transitions from <code>processing</code> &rarr; <code>processed</code>, and MongoDB atomically increments the user's balance (<code>$inc: {"balance": amount}</code>) and sets <code>users.status = "processed"</code>.</li>
+          </ul>
+        </li>
+      </ul>
+    </li>
+  </ol>
+
+  <hr>
+
+  <h2>3. Testing Strategy</h2>
+
+  <p>
+    The test suite (<code>backend/tests/</code>) follows the testing pyramid across all five architectural layers, executable via <code>docker compose run --rm backend pytest tests/ -v</code>:
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 18%;">Layer</th>
+        <th style="width: 25%;">Suite</th>
+        <th>Coverage Focus</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Domain</strong></td>
+        <td><code>test_domain.py</code></td>
+        <td>Entity defaults, UTC timezone normalization, exclusion of invalid states, DTO-to-entity converters (<code>to_event</code>, <code>from_event</code>, <code>from_user</code>), and abstract port enforcement.</td>
+      </tr>
+      <tr>
+        <td><strong>Repository</strong></td>
+        <td><code>test_repository.py</code></td>
+        <td>Atomic <code>$inc</code> updates, creation guard rejecting non-<code>processing</code> tasks, optimistic concurrency filter preventing terminal-state overwrites, and 5-minute query filters.</td>
+      </tr>
+      <tr>
+        <td><strong>Use-Cases</strong></td>
+        <td><code>test_use_cases.py</code></td>
+        <td><code>UserCreditService</code> ingestion (<code>submit_credit</code>) and worker execution (<code>execute_credit_task</code>): happy path, 5-min duplicate rejection, burst queue revocation, user status reconciliation, and concurrent revoke abort.</td>
+      </tr>
+      <tr>
+        <td><strong>Worker</strong></td>
+        <td><code>test_worker_tasks.py</code></td>
+        <td>Persistent event loop reuse across invocations, <code>celery_app.control.revoke</code> integration, and task execution wiring.</td>
+      </tr>
+      <tr>
+        <td><strong>API</strong></td>
+        <td><code>test_credits.py</code></td>
+        <td>FastAPI <code>TestClient</code> tests with DI overrides for <code>POST /credits</code> (<code>202</code> &amp; <code>422</code>), <code>GET /users/{id}</code> (<code>200</code> &amp; <code>404</code>), <code>GET /credits/{id}</code>, and <code>GET /health</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <hr>
+
+  <h2>5. Frontend Console &amp; Additional Enhancements</h2>
+
+  <ul>
+    <li>
+      <strong>Interactive React Console (<code>frontend/</code>)</strong>: Built with React, Vite, and served via Nginx on port <code>3000</code>. Allows reviewers to submit credit requests, view live task IDs, and automatically poll <code>GET /users/{user_id}</code> every second to watch the status transition from <code>processing</code> &rarr; <code>processed</code> and see live balance updates.
+    </li>
+    <li>
+      <strong>Database Indexing &amp; Lifespan Management</strong>: On startup, FastAPI's <code>lifespan</code> hook automatically provisions unique indexes on <code>users(user_id)</code> and <code>credit_tasks(task_id)</code>, plus a compound index on <code>credit_tasks(user_id, amount, created_at)</code> for <em>O</em>(log <em>N</em>) 5-minute window lookups.
+    </li>
+    <li>
+      <strong>Future Production Roadmap</strong>:
+      <ol>
+        <li><strong>API-Edge Idempotency Keys</strong>: Accept an <code>Idempotency-Key</code> header in <code>POST /credits</code> stored in Redis with a TTL to short-circuit network retries before hitting MongoDB.</li>
+        <li><strong>Transactional Outbox Pattern</strong>: Write the <code>CreditTaskEvent</code> and <code>users</code> status update inside a MongoDB multi-document transaction, using Change Streams to publish to Redis for guaranteed at-least-once delivery even if Redis is momentarily unreachable.</li>
+      </ol>
+    </li>
+  </ul>
+
+</body>
+</html>
