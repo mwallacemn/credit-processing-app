@@ -38,13 +38,13 @@ def test_revoke_celery_tasks_calls_control_revoke(mock_revoke):
 
 
 @patch("app.infrastructure.tasks.MongoUserRepository")
-@patch("app.infrastructure.tasks.UserCreditService")
-def test_process_credit_task_executes_user_credit_service(mock_service_cls, mock_repo_cls):
+@patch("app.infrastructure.tasks.CreditTaskService")
+def test_process_credit_task_executes_credit_task_service(mock_service_cls, mock_repo_cls):
     mock_repo_instance = MagicMock()
     mock_repo_cls.return_value = mock_repo_instance
 
     mock_service_instance = MagicMock()
-    mock_service_instance.execute_credit_task = AsyncMock(
+    mock_service_instance.execute = AsyncMock(
         return_value={
             "task_id": "task-123",
             "user_id": "u_123",
@@ -59,18 +59,18 @@ def test_process_credit_task_executes_user_credit_service(mock_service_cls, mock
     assert result["task_id"] == "task-123"
     assert result["balance"] == 150.0
     assert result["status"] == "processed"
-    mock_service_instance.execute_credit_task.assert_called_once_with("task-123")
+    mock_service_instance.execute.assert_called_once_with("task-123")
 
 
 @patch("app.infrastructure.tasks.MongoUserRepository")
-@patch("app.infrastructure.tasks.UserCreditService")
+@patch("app.infrastructure.tasks.CreditTaskService")
 @patch.object(tasks_module.process_credit, "retry")
 def test_process_credit_task_retries_on_exception(mock_retry, mock_service_cls, mock_repo_cls):
     mock_repo_cls.return_value = MagicMock()
 
     db_error = RuntimeError("transient mongo timeout")
     mock_service_instance = MagicMock()
-    mock_service_instance.execute_credit_task = AsyncMock(side_effect=db_error)
+    mock_service_instance.execute = AsyncMock(side_effect=db_error)
     mock_service_cls.return_value = mock_service_instance
 
     mock_retry.side_effect = RuntimeError("celery-retry-triggered")

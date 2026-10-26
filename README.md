@@ -178,7 +178,8 @@ docker compose run --rm backend pytest tests/ -v
 │   │   │   └── health.py      # Health & monitoring endpoints
 │   │   ├── use_cases/         # Application business logic & orchestration
 │   │   │   ├── __init__.py
-│   │   │   └── user_credit_service.py  # Credit ingestion, 5-min duplicate guard, revocation & balance update
+│   │   │   ├── user_credit_service.py  # API credit ingestion & user query service
+│   │   │   └── credit_task_service.py  # Worker 5-min duplicate guard, revocation & balance update
 │   │   ├── domain/            # Core domain models, enums & repository interfaces
 │   │   │   ├── __init__.py
 │   │   │   ├── user.py              # User domain entity & UserStatus enum
@@ -210,7 +211,8 @@ docker compose run --rm backend pytest tests/ -v
 │       │   └── test_interfaces.py        # IUserInterface abstract contract tests
 │       ├── use_cases/
 │       │   ├── __init__.py
-│       │   └── test_user_credit_service.py # UserCreditService submission & worker execution tests
+│       │   ├── test_user_credit_service.py # UserCreditService submission & query tests
+│       │   └── test_credit_task_service.py # CreditTaskService duplicate guard & worker execution tests
 │       └── infrastructure/
 │           ├── __init__.py
 │           ├── test_tasks.py             # Celery worker task, retry & event loop tests

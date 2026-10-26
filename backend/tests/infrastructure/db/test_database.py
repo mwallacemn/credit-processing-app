@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import app.infrastructure.db.database as db_module
-from app.infrastructure.db.database import get_async_database, get_sync_database, lifespan
+from app.infrastructure.db.database import get_async_database, lifespan
 
 
 @pytest.mark.asyncio
@@ -43,20 +43,3 @@ def test_get_async_database_initializes_and_reuses_client(mock_motor_cls):
         mock_motor_cls.assert_called_once()
     finally:
         db_module.async_mongo_client = original_client
-
-
-@patch("app.infrastructure.db.database.MongoClient")
-def test_get_sync_database_initializes_and_reuses_client(mock_mongo_cls):
-    original_client = db_module._sync_mongo_client
-    try:
-        db_module._sync_mongo_client = None
-        mock_client_instance = MagicMock()
-        mock_mongo_cls.return_value = mock_client_instance
-
-        db1 = get_sync_database()
-        db2 = get_sync_database()
-
-        assert db1 is db2
-        mock_mongo_cls.assert_called_once()
-    finally:
-        db_module._sync_mongo_client = original_client

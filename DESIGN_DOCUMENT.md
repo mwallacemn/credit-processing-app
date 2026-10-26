@@ -15,7 +15,7 @@ Before decision points, I'll note that the vast majority of code and portions of
 Gemini 3.8 Flash. I used planning mode to design the updates and worked through multiple plan iterations before applying the changes.
 
 **Additional Decision points:**
-- I updated the API and data model by incorporating a Credit Task database model. This model stores the credit amount, user,
+- I updated the API and data model by incorporating a Credit Task collection. This collection stores the credit amount, user,
 and status instead of keeping status on the user record. This allows for multiple credits to be submitted (potentially from different actors) 
 at the same time for a single user. 
 - FastAPI and MongoDB's AsyncIOMotorClient use asyncio natively, but celery workers are naturally synchronous. To allow the same async use-case to be applied both within the core app and celery tasks,
