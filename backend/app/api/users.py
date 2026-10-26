@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.domain.models import UserResponse
-from app.infrastructure.db.database import get_async_database
+from app.api.dependencies import get_user_credit_service
+from app.api.schemas import UserResponse
+from app.use_cases.user_credit_service import UserCreditService
 
 router = APIRouter(tags=["Users"])
 
@@ -10,17 +11,15 @@ router = APIRouter(tags=["Users"])
     "/users/{user_id}",
     response_model=UserResponse,
 )
-async def get_user(user_id: str):
-    """Fetch user balance and status."""
-    db = get_async_database()
-    user = await db["users"].find_one({"user_id": user_id}, {"_id": 0})
+async def get_user(
+    user_id: str,
+    service: UserCreditService = Depends(get_user_credit_service),
+):
+    """Fetch user balance and status via UserCreditService."""
+    user = await service.get_user(user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"User {user_id} not found",
         )
-    return UserResponse(
-        user_id=user.get("user_id"),
-        balance=user.get("balance", 0.0),
-        status=user.get("status", "unknown"),
-    )
+    return UserResponse.from_user(user)

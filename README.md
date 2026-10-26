@@ -159,6 +159,8 @@ docker compose run --rm backend pytest tests/ -v
 ├── .gitignore
 ├── README.md
 ├── docker-compose.yml
+├── docs/
+│   └── architecture.md        # Sequence diagrams & architectural design notes
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -166,26 +168,58 @@ docker compose run --rm backend pytest tests/ -v
 │   │   ├── __init__.py
 │   │   ├── main.py            # Application entrypoint & ASGI runner
 │   │   ├── config.py          # Environment settings
-│   │   ├── api/               # Presentation layer (FastAPI routes & app factory)
+│   │   ├── api/               # Presentation layer (FastAPI routes & DI)
 │   │   │   ├── __init__.py
 │   │   │   ├── app.py         # FastAPI application factory & lifecycle
+│   │   │   ├── dependencies.py# FastAPI dependency injection providers
 │   │   │   ├── router.py      # Master API router
 │   │   │   ├── credits.py     # Credit endpoints (POST /credits, GET /credits/{id})
 │   │   │   ├── users.py       # User endpoints (GET /users/{id})
 │   │   │   └── health.py      # Health & monitoring endpoints
-│   │   ├── domain/            # Core domain models & schemas
+│   │   ├── use_cases/         # Application business logic & orchestration
 │   │   │   ├── __init__.py
-│   │   │   └── models.py      # Pydantic domain models
+│   │   │   └── user_credit_service.py  # Credit ingestion, 5-min duplicate guard, revocation & balance update
+│   │   ├── domain/            # Core domain models, enums & repository interfaces
+│   │   │   ├── __init__.py
+│   │   │   ├── user.py              # User domain entity & UserStatus enum
+│   │   │   ├── credit_task_event.py # CreditTaskEvent entity & TaskStatus enum
+│   │   │   └── interfaces.py        # IUserInterface repository port
 │   │   └── infrastructure/    # External systems & persistence
 │   │       ├── __init__.py
 │   │       ├── celery_app.py  # Celery broker configuration
-│   │       ├── tasks.py       # Celery background tasks
-│   │       └── db/
+│   │       ├── tasks.py       # Celery background task runner
+│   │       ├── db/
+│   │       │   ├── __init__.py
+│   │       │   └── database.py# MongoDB async & sync connections
+│   │       └── repositories/
 │   │           ├── __init__.py
-│   │           └── database.py# MongoDB async & sync connections
+│   │           └── user_repository.py # MongoUserRepository implementation
 │   └── tests/
 │       ├── __init__.py
-│       └── test_credits.py    # Unit & API test suite
+│       ├── api/
+│       │   ├── __init__.py
+│       │   ├── test_credits.py      # POST /credits & GET /credits/{id} route tests
+│       │   ├── test_dependencies.py # FastAPI DI provider tests
+│       │   ├── test_users.py        # GET /users/{id} route tests
+│       │   ├── test_health.py       # GET /health (healthy & unhealthy) route tests
+│       │   └── test_schemas.py      # CreditRequest/Response & UserResponse DTO tests
+│       ├── domain/
+│       │   ├── __init__.py
+│       │   ├── test_user.py              # User entity & UserStatus enum tests
+│       │   ├── test_credit_task_event.py # CreditTaskEvent, TaskStatus & had_failed tests
+│       │   └── test_interfaces.py        # IUserInterface abstract contract tests
+│       ├── use_cases/
+│       │   ├── __init__.py
+│       │   └── test_user_credit_service.py # UserCreditService submission & worker execution tests
+│       └── infrastructure/
+│           ├── __init__.py
+│           ├── test_tasks.py             # Celery worker task, retry & event loop tests
+│           ├── db/
+│           │   ├── __init__.py
+│           │   └── test_database.py      # Lifespan index provisioning & client reuse tests
+│           └── repositories/
+│               ├── __init__.py
+│               └── test_user_repository.py # MongoUserRepository & terminal-state guard tests
 └── frontend/
     ├── Dockerfile             # Multi-stage build + Nginx
     ├── nginx.conf             # Proxy and static file serving

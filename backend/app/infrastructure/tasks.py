@@ -1,39 +1,48 @@
+import asyncio
 import logging
+from typing import List
+
 from app.infrastructure.celery_app import celery_app
-from app.infrastructure.db.database import get_sync_database
+from app.infrastructure.repositories.user_repository import MongoUserRepository
+from app.use_cases.user_credit_service import UserCreditService
 
 logger = logging.getLogger(__name__)
 
+# Persistent worker event loop so Motor AsyncIOMotorClient stays bound to the same loop
+_worker_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_worker_loop() -> asyncio.AbstractEventLoop:
+    global _worker_loop
+    if _worker_loop is None or _worker_loop.is_closed():
+        _worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_worker_loop)
+    return _worker_loop
+
+
+def _revoke_celery_tasks(task_ids: List[str]) -> None:
+    celery_app.control.revoke(task_ids, terminate=False)
+
+
+def enqueue_credit_task(task_id: str) -> None:
+    process_credit.apply_async(args=[task_id], task_id=task_id)
+
 
 @celery_app.task(name="app.infrastructure.tasks.process_credit", bind=True, max_retries=3)
-def process_credit(self, user_id: str, amount: float) -> dict:
+def process_credit(self, credit_task_id: str) -> dict:
     """
-    Celery task to credit a user's account asynchronously.
-    Updates the user's balance and sets status to 'processed'.
+    Celery task that instantiates UserCreditService to validate and apply a credit task event.
     """
-    logger.info(f"Processing credit for user {user_id}: +{amount}")
-    db = get_sync_database()
-    users_collection = db["users"]
+    logger.info(f"Executing UserCreditService.execute_credit_task for task_id={credit_task_id}")
+    loop = _get_worker_loop()
+    repository = MongoUserRepository()
+    service = UserCreditService(
+        user_repository=repository,
+        revoke_callback=_revoke_celery_tasks,
+    )
 
     try:
-        # Increment balance (creates field if not present) and set status to 'processed'
-        result = users_collection.find_one_and_update(
-            {"user_id": user_id},
-            {
-                "$inc": {"balance": amount},
-                "$set": {"status": "processed"},
-            },
-            return_document=True,
-            upsert=True,
-        )
-
-        logger.info(f"Credit processed successfully for {user_id}. New balance: {result.get('balance')}")
-        return {
-            "user_id": user_id,
-            "balance": result.get("balance"),
-            "status": "processed",
-        }
+        return loop.run_until_complete(service.execute_credit_task(credit_task_id))
     except Exception as exc:
-        logger.error(f"Error processing credit for {user_id}: {exc}")
-        # Retry with exponential backoff if failed
+        logger.error(f"Error processing credit task {credit_task_id}: {exc}")
         raise self.retry(exc=exc, countdown=2 ** self.request.retries)

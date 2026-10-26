@@ -1,17 +1,8 @@
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
-from app.infrastructure.db.database import get_async_database
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Setup database indexes on startup
-    db = get_async_database()
-    await db["users"].create_index("user_id", unique=True)
-    yield
+from app.infrastructure.db import lifespan
 
 
 def create_app() -> FastAPI:
